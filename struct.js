@@ -10,485 +10,474 @@
 // TODO: add options[, 'string convert']
 
 (function(global, undefined) {
+	"use strict";
+	/**
+	* @class Struct
+	*
+	* @param {object} struct
+	* @param {*} value
+	* @param {boolean} endian
+	*
+	*/
+	var Struct = function(struct, value, endian) {
+		this.endian = endian == undefined && true || endian;
+		this.defaultValue = value || 0;
+		
+		this.struct = normalize(struct, this.defaultValue);
+		this.byteLength = getByteLength(this.struct);
+		this.emptyBuffer = new ArrayBuffer(this.byteLength);
 
-  "use strict";
+		this.constructor = Struct;
+		this._debug = false;
+		this._struct = {};
 
+		this._debug && console.log('STRUCT.CREATE'
+			, 'defaultValue:', this.defaultValue
+			, 'byteLength:', this.byteLength
+			, 'endian:', this.endian
+			, 'struct:', this.struct);
+	};
 
-  /**
-   * @class Struct
-   *
-   * @param {object} struct
-   * @param {*} value
-   * @param {boolean} endian
-   *
-   */
+	/** @method **/
+	Struct.prototype = {
+		update: function(struct) {
+			this.struct = update(this.struct, struct || {});
+			this.byteLength = getByteLength(this.struct);
+			this.emptyBuffer = new ArrayBuffer(this.byteLength);
 
-  var Struct = function(struct, value, endian) {
-    this.endian = endian == undefined && true || endian;
-    this.defaultValue = value || 0;
-    
-    this.struct = normalize(struct, this.defaultValue);
-    this.byteLength = getByteLength(this.struct);
-    this.emptyBuffer = new ArrayBuffer(this.byteLength);
+			return clone(this.struct);
+		},
 
-    this.constructor = Struct;
-    this._debug = false;
-    this._struct = {};
+		read: function(arrayBuffer, offset) {
+			if (arrayBuffer === undefined && offset === undefined) {
+				return align(this.struct, function(item, prop, struct) {
+					struct[prop] = item[1];
+				});
+			}
 
-    this._debug && console.log('STRUCT.CREATE'
-      , 'defaultValue:', this.defaultValue
-      , 'byteLength:', this.byteLength
-      , 'endian:', this.endian
-      , 'struct:', this.struct);
-  };
+			var that = this
+				, endian = this.endian
+				, dv = arrayBuffer instanceof DataView && arrayBuffer || new DataView(arrayBuffer);
 
+			if (arrayBuffer.byteLength === 0 || arrayBuffer.byteLength < this.byteLength)
+				return new Error('Uncaught IndexSizeError: Buffer size was zero byte.');
 
-  /** @method **/
+			this.offset = offset || 0;
 
-  Struct.prototype = {
-    update: function(struct) {
-      this.struct = update(this.struct, struct || {});
-      this.byteLength = getByteLength(this.struct);
-      this.emptyBuffer = new ArrayBuffer(this.byteLength);
+			this._debug && console.info(
+					'STRUCT.READ'
+				, 'byteLength:', arrayBuffer.byteLength
+				, 'readOffset:', this.offset);
+	
+			var readed = align(this.struct, function(item, prop, struct) {
+				var values = new Array()
+					, typed = item[0]
+					, value = item[1]
+					, length = item[2]
+					, vary = item[3]
+					, size = typedefs[typed] || 1
+					, lengthTyped = 'uint8'
+					, i = 0;
 
-      return clone(this.struct);
-    },
+				if (isString(length)) {
+					lengthTyped = length;
+					length = value.byteLength || value.length;
+				}
 
-    read: function(arrayBuffer, offset) {
-      if (arrayBuffer === undefined && offset === undefined) {
-        return align(this.struct, function(item, prop, struct) {
-          struct[prop] = item[1];
-        });
-      }
+				if (arrayBuffer.byteLength <= that.offset)
+					return new Error('Uncaught IndexSizeError: Index or size was negative.');
 
-      var that = this
-        , endian = this.endian
-        , dv = arrayBuffer instanceof DataView && arrayBuffer || new DataView(arrayBuffer);
+				if (vary === true) {
+					length = dv['get' + capitalise(lengthTyped)](that.offset, endian) / size;
+					that.offset += typedefs[lengthTyped];
 
-      if (arrayBuffer.byteLength === 0 || arrayBuffer.byteLength < this.byteLength)
-        return new Error('Uncaught IndexSizeError: Buffer size was zero byte.');
+					that._struct[prop + 'Size'] = [lengthTyped, length * size];
+					that._debug && console.log(prop + 'Size', that._struct[prop + 'Size'], that.offset);
+				}
 
-      this.offset = offset || 0;
+				if (isArrayBuffer(value)) {
+					var endOffset = that.offset + length * size;
+					if (arrayBuffer.byteLength < endOffset)
+						return new Error('Uncaught IndexSizeError: Index or size was negative.');
 
-      this._debug && console.info(
-          'STRUCT.READ'
-        , 'byteLength:', arrayBuffer.byteLength
-        , 'readOffset:', this.offset);
-  
-      var readed = align(this.struct, function(item, prop, struct) {
-        var values = new Array()
-          , typed = item[0]
-          , value = item[1]
-          , length = item[2]
-          , vary = item[3]
-          , size = typedefs[typed] || 1
-          , lengthTyped = 'uint8'
-          , i = 0;
+					values = arrayBuffer.slice(that.offset, endOffset);
+					//console.log(arrayBuffer.byteLength, values.byteLength, length);
+					that.offset += length * size;
+				} else {
+					while (i < length) {
+						if (isStruct(typed)) {
+							var buffer = arrayBuffer.slice(that.offset);
+							values[i] = typed.read(buffer);
+							size = typed.byteLength;
+						} else {
+							values[i] = dv['get' + capitalise(typed)](that.offset, endian);
+						}
+						if (isError(values[i])) return values[i];
 
-        if (isString(length)) {
-          lengthTyped = length;
-          length = value.byteLength || value.length;
-        }
+						that.offset += size;
+						i++;
+					}
+				}
 
-        if (arrayBuffer.byteLength <= that.offset)
-          return new Error('Uncaught IndexSizeError: Index or size was negative.');
+				// for vary types
+				if (isArrayBuffer(value) || isString(value) || isArray(value) || length > 1) {
+					struct[prop] = isString(value) ? charCodeArrToStr(values) : values;
+				} else {
+					struct[prop] = values[0];
+				}
+				
+				that._struct[prop] = [typed, struct[prop]];
+				that._debug && console.log(prop, that._struct[prop], that.offset);
+			}); // align
+			
+			if (!isError(readed)) {
+				this.byteLength = this.offset;
+				//this.offset != arrayBuffer.byteLength && console.warn('Incorrect buffer size readed');
+			}
 
-        if (vary === true) {
-          length = dv['get' + capitalise(lengthTyped)](that.offset, endian) / size;
-          that.offset += typedefs[lengthTyped];
+			return readed;
+		},
 
-          that._struct[prop + 'Size'] = [lengthTyped, length * size];
-          that._debug && console.log(prop + 'Size', that._struct[prop + 'Size'], that.offset);
-        }
+		write: function(struct) {
+			var that = this
+				, offset = 0
+				, endian = this.endian;
+	
+			if (struct !== undefined) {
+				this.update(struct);
+			}
 
-        if (isArrayBuffer(value)) {
-          var endOffset = that.offset + length * size;
-          if (arrayBuffer.byteLength < endOffset)
-            return new Error('Uncaught IndexSizeError: Index or size was negative.');
+			var dataView = new DataView(this.emptyBuffer)
+	
+			this._debug && console.info(
+					'STRUCT.WRITE'
+				, 'byteLength:', this.byteLength);
+	
+			align(this.struct, function(item, prop) {
+				var values = new Array()
+					, typed = item[0]
+					, value = item[1]
+					, length = item[2]
+					, vary = item[3]
+					, size = typedefs[typed]
+					, lengthTyped = 'uint8'
+					, i = 0;
 
-          values = arrayBuffer.slice(that.offset, endOffset);
-          //console.log(arrayBuffer.byteLength, values.byteLength, length);
-          that.offset += length * size;
-        } else {
-          while (i < length) {
-            if (isStruct(typed)) {
-              var buffer = arrayBuffer.slice(that.offset);
-              values[i] = typed.read(buffer);
-              size = typed.byteLength;
-            } else {
-              values[i] = dv['get' + capitalise(typed)](that.offset, endian);
-            }
-            if (isError(values[i])) return values[i];
+				if (size === undefined && isStruct(typed)) {
+					size = typed.byteLength
+				}
 
-            that.offset += size;
-            i++;
-          }
-        }
+				if (isString(length)) {
+					lengthTyped = length;
+					length = value.byteLength || value.length;
+				}
 
-        // for vary types
-        if (isArrayBuffer(value) || isString(value) || isArray(value) || length > 1) {
-          struct[prop] = isString(value) ? charCodeArrToStr(values) : values;
-        } else {
-          struct[prop] = values[0];
-        }
-        
-        that._struct[prop] = [typed, struct[prop]];
-        that._debug && console.log(prop, that._struct[prop], that.offset);
-      }); // align
-      
-      if (!isError(readed)) {
-        this.byteLength = this.offset;
-        //this.offset != arrayBuffer.byteLength && console.warn('Incorrect buffer size readed');
-      }
+				if (vary === true) {
+					dataView['set' + capitalise(lengthTyped)](offset, length * size, endian);
+					offset += typedefs[lengthTyped];
+					that._struct[prop + 'Size'] = [lengthTyped, length * size];
+					that._debug && console.log(prop + 'Size', that._struct[prop + 'Size'], offset);
+				}
 
-      return readed;
-    },
+				that._struct[prop] = [typed, value];
 
-    write: function(struct) {
-      var that = this
-        , offset = 0
-        , endian = this.endian;
-  
-      if (struct !== undefined) {
-        this.update(struct);
-      }
+				// for vary types
+				if (isArrayBuffer(value) || isString(value) || isArray(value) || length > 1) {
+					if (isArrayBuffer(value)) values = arrayBufferToArray(value, typed);
+					if (isFunction(value)) values = [that.defaultValue];
+					values = isString(value) && strToCharCodeArr(value) || value;
+				} else {
+					values = [value];
+				}
 
-      var dataView = new DataView(this.emptyBuffer)
-  
-      this._debug && console.info(
-          'STRUCT.WRITE'
-        , 'byteLength:', this.byteLength);
-  
-      align(this.struct, function(item, prop) {
-        var values = new Array()
-          , typed = item[0]
-          , value = item[1]
-          , length = item[2]
-          , vary = item[3]
-          , size = typedefs[typed]
-          , lengthTyped = 'uint8'
-          , i = 0;
-
-        if (size === undefined && isStruct(typed)) {
-          size = typed.byteLength
-        }
-
-        if (isString(length)) {
-          lengthTyped = length;
-          length = value.byteLength || value.length;
-        }
-
-        if (vary === true) {
-          dataView['set' + capitalise(lengthTyped)](offset, length * size, endian);
-          offset += typedefs[lengthTyped];
-          that._struct[prop + 'Size'] = [lengthTyped, length * size];
-          that._debug && console.log(prop + 'Size', that._struct[prop + 'Size'], offset);
-        }
-
-        that._struct[prop] = [typed, value];
-
-        // for vary types
-        if (isArrayBuffer(value) || isString(value) || isArray(value) || length > 1) {
-          if (isArrayBuffer(value)) values = arrayBufferToArray(value, typed);
-          if (isFunction(value)) values = [that.defaultValue];
-          values = isString(value) && strToCharCodeArr(value) || value;
-        } else {
-          values = [value];
-        }
-
-        while (i < length) {
-          if (isStruct(typed)) {
-            var buffer = typed.write();
-            var tmp = new Uint8Array(buffer);
-            var j = 0;
+				while (i < length) {
+					if (isStruct(typed)) {
+						var buffer = typed.write();
+						var tmp = new Uint8Array(buffer);
+						var j = 0;
  
-            while (j < tmp.length) {
-              dataView.setUint8(offset, tmp[j], endian);
-              offset += 1;
-              j++;
-            }
+						while (j < tmp.length) {
+							dataView.setUint8(offset, tmp[j], endian);
+							offset += 1;
+							j++;
+						}
 
-          } else {
-            dataView['set' + capitalise(typed)](offset, values[i], endian);
-          }
+					} else {
+						dataView['set' + capitalise(typed)](offset, values[i], endian);
+					}
 
-          offset += size;
-          i++;
-        }
+					offset += size;
+					i++;
+				}
 
-        that._debug && console.log(prop, that._struct[prop], offset);
-      }); // align
+				that._debug && console.log(prop, that._struct[prop], offset);
+			}); // align
 
-      offset != this.emptyBuffer.byteLength && console.warn('Incorrect buffer size writed');
+			offset != this.emptyBuffer.byteLength && console.warn('Incorrect buffer size writed');
 
-      return dataView.buffer;
-    }
-  };
+			return dataView.buffer;
+		}
+	};
 
-  var typedefs = {
-    int8 : 1, uint8 : 1,
-    int16: 2, uint16: 2,
-    int32: 4, uint32: 4, float32: 4, 
-    int64: 8, uint64: 8, float64: 8
-  };
+	var typedefs = {
+		int8 : 1, uint8 : 1,
+		int16: 2, uint16: 2,
+		int32: 4, uint32: 4, float32: 4, 
+		int64: 8, uint64: 8, float64: 8
+	};
 
+	/** @private **/
+	function isStruct(a) {
+		return !!a && a.constructor === Struct;
+	}
 
-  /** @private **/
-  function isStruct(a) {
-    return !!a && a.constructor === Struct;
-  }
+	function isError(a) {
+		return !!a && a.constructor === Error;
+	}
 
-  function isError(a) {
-    return !!a && a.constructor === Error;
-  }
+	function isArray(a) {
+		return !!a && a === Array || a.constructor === Array;
+	}
 
-  function isArray(a) {
-    return !!a && a === Array || a.constructor === Array;
-  }
+	function isObject(a) {
+		return !!a && a === Object || a.constructor === Object;
+	}
+	
+	function isNumber(a) {
+		return !!a && a === Number || a.constructor === Number;
+	}
+	
+	function isString(a) {
+		return !!a && a === String || a.constructor === String;
+	}
+	
+	function isFunction(a) {
+		return !!a && a === Function || a.constructor === Function;
+	}
 
-  function isObject(a) {
-    return !!a && a === Object || a.constructor === Object;
-  }
-  
-  function isNumber(a) {
-    return !!a && a === Number || a.constructor === Number;
-  }
-  
-  function isString(a) {
-    return !!a && a === String || a.constructor === String;
-  }
-  
-  function isFunction(a) {
-    return !!a && a === Function || a.constructor === Function;
-  }
+	function isArrayBuffer(a) {
+		return !!a && a === ArrayBuffer || a.constructor === ArrayBuffer;
+	}
 
-  function isArrayBuffer(a) {
-    return !!a && a === ArrayBuffer || a.constructor === ArrayBuffer;
-  }
+	function capitalise(str) {
+		return str.charAt(0).toUpperCase() + str.slice(1);
+	}
 
-  function capitalise(str) {
-    return str.charAt(0).toUpperCase() + str.slice(1);
-  }
+	function align(model, callback) {
+		var struct = {}
+			, error = null;
 
-  function align(model, callback) {
-    var struct = {}
-      , error = null;
+		for (var p in model) {
+			if (model.hasOwnProperty(p)) {
+				var item = model[p];
+				if (isObject(item)) {
+					struct[p] = align(item, callback);
+				} else {
+					error = callback(item, p, struct);
+					if (error) {
+						struct = error;
+						break;
+					}
+				}
+			}
+		}
+		return struct;
+	}
 
-    for (var p in model) {
-      if (model.hasOwnProperty(p)) {
-        var item = model[p];
-        if (isObject(item)) {
-          struct[p] = align(item, callback);
-        } else {
-          error = callback(item, p, struct);
-          if (error) {
-            struct = error;
-            break;
-          }
-        }
-      }
-    }
-    return struct;
-  }
+	function update(model, obj) {
+		for (var p in obj) {
+			if (model.hasOwnProperty(p)) {
+				if (isObject(model[p])) {
+					model[p] = update(model[p], obj[p]);
+				} else {
+					model[p][1] = obj[p];
+				}
+			}
+		}
+		return model;
+	}
+	
+	function clone(obj) {
+		var struct = {}
+		for (var p in obj) {
+			if (obj.hasOwnProperty(p)) {
+				struct[p] = obj[p];
+			}
+		}
+		return struct;
+	}
 
-  function update(model, obj) {
-    for (var p in obj) {
-      if (model.hasOwnProperty(p)) {
-        if (isObject(model[p])) {
-          model[p] = update(model[p], obj[p]);
-        } else {
-          model[p][1] = obj[p];
-        }
-      }
-    }
-    return model;
-  }
-  
-  function clone(obj) {
-    var struct = {}
-    for (var p in obj) {
-      if (obj.hasOwnProperty(p)) {
-        struct[p] = obj[p];
-      }
-    }
-    return struct;
-  }
+	function normalize(model, defaultValue) {
+		return align(model, function(params, prop, struct) {
+			var values = []
+				// [0] typed, define correct typed string or sctruct object form params
+				, _typed = isArray(params) && params[0] || params
+				, typed = isStruct(_typed) && _typed || _typed.toLowerCase()
+				// [1] value, define single, multiple, vary value form params
+				, value = isString(params) ? defaultValue : params[1]
+				// [2] length, define correct length of value(not byteLength)
+				, length = isArray(params) && params.length >= 3 && params[2]
+					|| (isString(value) || isArray(value) || isArrayBuffer(value)) && value.length
+					|| isArrayBuffer(value) && value.byteLength || 1
+				// [3] vary, define using vary type as boolean from params
+				, vary = isArray(params) && (isString(length) || length > 1)
+					? isString(length) && params[3] === undefined && true || params[3] : false;
 
-  function normalize(model, defaultValue) {
-    return align(model, function(params, prop, struct) {
-      var values = []
-        // [0] typed, define correct typed string or sctruct object form params
-        , _typed = isArray(params) && params[0] || params
-        , typed = isStruct(_typed) && _typed || _typed.toLowerCase()
-        // [1] value, define single, multiple, vary value form params
-        , value = isString(params) ? defaultValue : params[1]
-        // [2] length, define correct length of value(not byteLength)
-        , length = isArray(params) && params.length >= 3 && params[2]
-          || (isString(value) || isArray(value) || isArrayBuffer(value)) && value.length
-          || isArrayBuffer(value) && value.byteLength || 1
-        // [3] vary, define using vary type as boolean from params
-        , vary = isArray(params) && (isString(length) || length > 1)
-          ? isString(length) && params[3] === undefined && true || params[3] : false;
+			struct[prop] = [typed, value, length, vary];
+		});
+	}
 
-      struct[prop] = [typed, value, length, vary];
-    });
-  }
+	function getByteLength(struct) {
+		var byteLength = 0;
 
-  function getByteLength(struct) {
-    var byteLength = 0;
+		align(struct, function(item, prop) {
+			var typed = item[0]
+				, value = item[1]
+				, length = item[2]
+				, vary = item[3]
+				, size = typedefs[typed]
+				, lengthTyped = 'uint8';
 
-    align(struct, function(item, prop) {
-      var typed = item[0]
-        , value = item[1]
-        , length = item[2]
-        , vary = item[3]
-        , size = typedefs[typed]
-        , lengthTyped = 'uint8';
+			if (size === undefined && isStruct(typed)) {
+				size = typed.byteLength
+			}
 
-      if (size === undefined && isStruct(typed)) {
-        size = typed.byteLength
-      }
+			if (isString(length)) {
+				lengthTyped = length;
+				length = value.byteLength || value.length;
+			}
 
-      if (isString(length)) {
-        lengthTyped = length;
-        length = value.byteLength || value.length;
-      }
+			if (vary === true) byteLength += typedefs[lengthTyped];
 
-      if (vary === true) byteLength += typedefs[lengthTyped];
+			byteLength += length * size;
+		});
 
-      byteLength += length * size;
-    });
+		return byteLength;
+	}
 
-    return byteLength;
-  }
+	function strToCharCodeArr(str) {
+		var arr = []
+			, len = str.length
+			, idx = 0;
 
-  function strToCharCodeArr(str) {
-    var arr = []
-      , len = str.length
-      , idx = 0;
+		while (idx < len) {
+			arr[idx] = str.charCodeAt(idx);
+			idx++;
+		}
 
-    while (idx < len) {
-      arr[idx] = str.charCodeAt(idx);
-      idx++;
-    }
+		return arr;
+	}
 
-    return arr;
-  }
+	function charCodeArrToStr(arr) {
+		var str = []
+			, len = arr.length
+			, idx = 0;
 
-  function charCodeArrToStr(arr) {
-    var str = []
-      , len = arr.length
-      , idx = 0;
+		while (idx < len) {
+			str[idx] = String.fromCharCode(arr[idx]);
+			idx++;
+		}
 
-    while (idx < len) {
-      str[idx] = String.fromCharCode(arr[idx]);
-      idx++;
-    }
+		return str.join('');
+	}
 
-    return str.join('');
-  }
+	function arrayBufferToArray(buf, typed) {
+		return Array.prototype.slice.call(new global[capitalise(typed) + 'Array'](buf));
+	}
 
-  function arrayBufferToArray(buf, typed) {
-    return Array.prototype.slice.call(new global[capitalise(typed) + 'Array'](buf));
-  }
+	/** support 64-bit int shim **/
+	if (DataView.prototype.getUint64 === undefined &&
+			DataView.prototype.setUint64 === undefined &&
+			DataView.prototype.getInt64	=== undefined &&
+			DataView.prototype.setInt64	=== undefined) {
 
-  /** support 64-bit int shim **/
+		var pow2 = function(n) {
+			return (n >= 0 && n < 31) ? (1 << n) : (pow2[n] || (pow2[n] = Math.pow(2, n)));
+		};
 
-  if (DataView.prototype.getUint64 === undefined &&
-      DataView.prototype.setUint64 === undefined &&
-      DataView.prototype.getInt64  === undefined &&
-      DataView.prototype.setInt64  === undefined) {
+		var Uint64 = function(lo, hi) {
+			this.lo = lo;
+			this.hi = hi;
+		};
+		
+		Uint64.prototype = {
+			valueOf: function () {
+				return this.lo + pow2(32) * this.hi;
+			},
+		
+			toString: function () {
+				return Number.prototype.toString.apply(this.valueOf(), arguments);
+			}
+		};
+		
+		Uint64.fromNumber = function (number) {
+			var hi = Math.floor(number / pow2(32))
+				, lo = number - hi * pow2(32);
 
-    var pow2 = function(n) {
-      return (n >= 0 && n < 31) ? (1 << n) : (pow2[n] || (pow2[n] = Math.pow(2, n)));
-    };
+			return new Uint64(lo, hi);
+		};
+		
+		var Int64 = function(lo, hi) {
+			Uint64.apply(this, arguments);
+		};
 
-    var Uint64 = function(lo, hi) {
-      this.lo = lo;
-      this.hi = hi;
-    };
-    
-    Uint64.prototype = {
-      valueOf: function () {
-        return this.lo + pow2(32) * this.hi;
-      },
-    
-      toString: function () {
-        return Number.prototype.toString.apply(this.valueOf(), arguments);
-      }
-    };
-    
-    Uint64.fromNumber = function (number) {
-      var hi = Math.floor(number / pow2(32))
-        , lo = number - hi * pow2(32);
+		Int64.prototype = 'create' in Object ? Object.create(Uint64.prototype) : new Uint64();
 
-      return new Uint64(lo, hi);
-    };
-    
-    var Int64 = function(lo, hi) {
-      Uint64.apply(this, arguments);
-    };
+		Int64.prototype.valueOf = function () {
+			if (this.hi < pow2(31)) {
+				return Uint64.prototype.valueOf.apply(this, arguments);
+			}
+			return -((pow2(32) - this.lo) + pow2(32) * (pow2(32) - 1 - this.hi));
+		};
+		
+		Int64.fromNumber = function (number) {
+			var lo, hi;
+			if (number >= 0) {
+				var unsigned = Uint64.fromNumber(number);
+				lo = unsigned.lo;
+				hi = unsigned.hi;
+			} else {
+				hi = Math.floor(number / pow2(32));
+				lo = number - hi * pow2(32);
+				hi += pow2(32);
+			}
+			return new Int64(lo, hi);
+		};
 
-    Int64.prototype = 'create' in Object ? Object.create(Uint64.prototype) : new Uint64();
+		
+		DataView.prototype.getUint64 = function(byteOffset, littleEndian) {
+			var parts = littleEndian ? [0, 4] : [4, 0];
+			for (var i = 0; i < 2; i++) {
+				parts[i] = this.getUint32(byteOffset + parts[i], littleEndian);
+			}
+			return new Uint64(parts[0], parts[1]).valueOf();
+		};
 
-    Int64.prototype.valueOf = function () {
-      if (this.hi < pow2(31)) {
-        return Uint64.prototype.valueOf.apply(this, arguments);
-      }
-      return -((pow2(32) - this.lo) + pow2(32) * (pow2(32) - 1 - this.hi));
-    };
-    
-    Int64.fromNumber = function (number) {
-      var lo, hi;
-      if (number >= 0) {
-        var unsigned = Uint64.fromNumber(number);
-        lo = unsigned.lo;
-        hi = unsigned.hi;
-      } else {
-        hi = Math.floor(number / pow2(32));
-        lo = number - hi * pow2(32);
-        hi += pow2(32);
-      }
-      return new Int64(lo, hi);
-    };
+		DataView.prototype.setUint64 = function(byteOffset, value, littleEndian) {
+			value = Uint64.fromNumber(value);
+			var parts = littleEndian ? {lo: 0, hi: 4} : {lo: 4, hi: 0};
+			for (var partName in parts) {
+				this.setUint32(byteOffset + parts[partName], value[partName], littleEndian);
+			}
+		};
 
-    
-    DataView.prototype.getUint64 = function(byteOffset, littleEndian) {
-      var parts = littleEndian ? [0, 4] : [4, 0];
-      for (var i = 0; i < 2; i++) {
-        parts[i] = this.getUint32(byteOffset + parts[i], littleEndian);
-      }
-      return new Uint64(parts[0], parts[1]).valueOf();
-    };
+		DataView.prototype.getInt64 = function(byteOffset, littleEndian) {
+			var parts = littleEndian ? [0, 4] : [4, 0];
+			for (var i = 0; i < 2; i++) {
+				parts[i] = this.getUint32(byteOffset + parts[i], littleEndian);
+			}
+			return new Int64(parts[0], parts[1]).valueOf();
+		};
 
-    DataView.prototype.setUint64 = function(byteOffset, value, littleEndian) {
-      value = Uint64.fromNumber(value);
-      var parts = littleEndian ? {lo: 0, hi: 4} : {lo: 4, hi: 0};
-      for (var partName in parts) {
-        this.setUint32(byteOffset + parts[partName], value[partName], littleEndian);
-      }
-    };
-
-    DataView.prototype.getInt64 = function(byteOffset, littleEndian) {
-      var parts = littleEndian ? [0, 4] : [4, 0];
-      for (var i = 0; i < 2; i++) {
-        parts[i] = this.getUint32(byteOffset + parts[i], littleEndian);
-      }
-      return new Int64(parts[0], parts[1]).valueOf();
-    };
-
-    DataView.prototype.setInt64 = function(byteOffset, littleEndian) {
-      value = Int64.fromNumber(value);
-      var parts = littleEndian ? {lo: 0, hi: 4} : {lo: 4, hi: 0};
-      for (var partName in parts) {
-        this.setUint32(byteOffset + parts[partName], value[partName], littleEndian);
-      }
-    };
-  }
-  
-  /** @global **/
-
-  global.Struct = Struct;
-
-
+		DataView.prototype.setInt64 = function(byteOffset, littleEndian) {
+			value = Int64.fromNumber(value);
+			var parts = littleEndian ? {lo: 0, hi: 4} : {lo: 4, hi: 0};
+			for (var partName in parts) {
+				this.setUint32(byteOffset + parts[partName], value[partName], littleEndian);
+			}
+		};
+	}
+	
+	/** @global **/
+	global.Struct = Struct;
 })(window);
